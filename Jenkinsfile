@@ -106,7 +106,10 @@ pipeline {
         stage('Quality Gate') {
             steps {
                 echo '🚦 Waiting for SonarQube Quality Gate result...'
-                timeout(time: 5, unit: 'MINUTES') {
+                // Requires SonarQube webhook configured:
+                //   SonarQube → Administration → Configuration → Webhooks
+                //   URL: http://<JENKINS_URL>/sonarqube-webhook/
+                timeout(time: 10, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
