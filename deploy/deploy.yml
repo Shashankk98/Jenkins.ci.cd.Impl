@@ -1,0 +1,140 @@
+# ===========================================================================
+# Ansible Playbook — Deploy Java Application
+# ===========================================================================
+# Deploys the JAR file to the target environment (staging or production).
+# Handles: stop old process → backup → copy JAR → start → health check
+#
+# Usage (from Jenkins or manually):
+#   ansible-playbook deploy/deploy.yml -i deploy/inventory.ini \
+#       -e "target_env=staging jar_file=target/untitled-1.0-SNAPSHOT.jar deploy_path=/opt/app"
+# ===========================================================================
+
+---
+- name: Deploy Java Application
+  hosts: "{{ target_env }}"
+  become: yes
+  gather_facts: yes
+
+  vars:
+    app_name: untitled
+    jar_file: "target/{{ app_name }}-1.0-SNAPSHOT.jar"
+    deploy_path: /opt/app
+    backup_path: /opt/app/backups
+    java_opts: "-Xms256m -Xmx512m"
+    app_port: 8080
+
+  tasks:
+
+    # ── 1. Ensure deployment directories exist ──
+    - name: Create deployment directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: deploy
+        group: deploy
+        mode: '0755'
+      loop:
+        - "{{ deploy_path }}"
+        - "{{ backup_path }}"
+        - "{{ deploy_path }}/logs"
+
+    # ── 2. Check if application is currently running ──
+    - name: Check for running application process
+      shell: "pgrep -f '{{ app_name }}.*\\.jar' || true"
+      register: app_pid
+      changed_when: false
+
+    # ── 3. Stop the existing application gracefully ──
+    - name: Stop existing application
+      shell: "kill {{ app_pid.stdout }}"
+      when: app_pid.stdout != ""
+      ignore_errors: yes
+
+    - name: Wait for application to stop
+      wait_for:
+        port: "{{ app_port }}"
+        state: stopped
+        timeout: 30
+      when: app_pid.stdout != ""
+      ignore_errors: yes
+
+    # ── 4. Backup the current JAR (for rollback) ──
+    - name: Backup current JAR file
+      copy:
+        src: "{{ deploy_path }}/{{ app_name }}.jar"
+        dest: "{{ backup_path }}/{{ app_name }}-{{ ansible_date_time.iso8601_basic }}.jar"
+        remote_src: yes
+      ignore_errors: yes
+
+    # ── 5. Keep only the last 5 backups ──
+    - name: List old backups
+      find:
+        paths: "{{ backup_path }}"
+        patterns: "{{ app_name }}-*.jar"
+        age: "7d"
+      register: old_backups
+
+    - name: Remove old backups
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      when: old_backups.files | length > 0
+
+    # ── 6. Deploy new JAR to target server ──
+    - name: Copy JAR to deployment server
+      copy:
+        src: "{{ jar_file }}"
+        dest: "{{ deploy_path }}/{{ app_name }}.jar"
+        owner: deploy
+        group: deploy
+        mode: '0644'
+
+    # ── 7. Create systemd service file ──
+    - name: Create systemd service for the application
+      template:
+        src: app.service.j2
+        dest: "/etc/systemd/system/{{ app_name }}.service"
+        mode: '0644'
+      notify: Reload systemd
+
+    # ── 8. Start the application ──
+    - name: Start the application
+      systemd:
+        name: "{{ app_name }}"
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    # ── 9. Wait for the application to be ready ──
+    - name: Wait for application to start
+      wait_for:
+        port: "{{ app_port }}"
+        timeout: 60
+        delay: 5
+      register: app_started
+
+    # ── 10. Health check ──
+    - name: Verify application is healthy
+      uri:
+        url: "http://localhost:{{ app_port }}/health"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: health_check
+      retries: 3
+      delay: 5
+      ignore_errors: yes
+
+    - name: Print deployment result
+      debug:
+        msg: >
+          ✅ Application '{{ app_name }}' deployed successfully to {{ target_env }}!
+          Server: {{ ansible_hostname }}
+          Port: {{ app_port }}
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+

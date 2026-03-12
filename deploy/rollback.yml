@@ -1,0 +1,70 @@
+# ===========================================================================
+# Ansible Playbook — Rollback to Previous Version
+# ===========================================================================
+# Usage:
+#   ansible-playbook deploy/rollback.yml -i deploy/inventory.ini \
+#       -e "target_env=staging"
+# ===========================================================================
+
+---
+- name: Rollback Java Application
+  hosts: "{{ target_env }}"
+  become: yes
+  gather_facts: yes
+
+  vars:
+    app_name: untitled
+    deploy_path: /opt/app
+    backup_path: /opt/app/backups
+    app_port: 8080
+
+  tasks:
+
+    - name: Find the latest backup JAR
+      find:
+        paths: "{{ backup_path }}"
+        patterns: "{{ app_name }}-*.jar"
+        file_type: file
+      register: backup_files
+
+    - name: Fail if no backup found
+      fail:
+        msg: "No backup JAR found in {{ backup_path }}. Cannot rollback."
+      when: backup_files.files | length == 0
+
+    - name: Get the most recent backup
+      set_fact:
+        latest_backup: "{{ (backup_files.files | sort(attribute='mtime') | last).path }}"
+
+    - name: Stop current application
+      systemd:
+        name: "{{ app_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Restore backup JAR
+      copy:
+        src: "{{ latest_backup }}"
+        dest: "{{ deploy_path }}/{{ app_name }}.jar"
+        remote_src: yes
+        owner: deploy
+        group: deploy
+        mode: '0644'
+
+    - name: Start the rolled-back application
+      systemd:
+        name: "{{ app_name }}"
+        state: started
+
+    - name: Wait for application to start
+      wait_for:
+        port: "{{ app_port }}"
+        timeout: 60
+        delay: 5
+
+    - name: Print rollback result
+      debug:
+        msg: >
+          ⏪ Application '{{ app_name }}' rolled back successfully on {{ target_env }}!
+          Restored from: {{ latest_backup }}
+
