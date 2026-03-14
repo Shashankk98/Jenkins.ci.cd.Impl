@@ -109,7 +109,7 @@ pipeline {
                 // Requires SonarQube webhook configured:
                 //   SonarQube → Administration → Configuration → Webhooks
                 //   URL: http://<JENKINS_URL>/sonarqube-webhook/
-                timeout(time: 5, unit: 'MINUTES') {
+                timeout(time: 2, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
